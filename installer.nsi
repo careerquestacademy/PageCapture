@@ -15,8 +15,8 @@ SetCompressor lzma
 
 !include "MUI2.nsh"
 !define MUI_ABORTWARNING
-!define MUI_ICON "..\assets\icon.ico"
-!define MUI_UNICON "..\assets\icon.ico"
+!define MUI_ICON "assets\icon.ico"
+!define MUI_UNICON "assets\icon.ico"
 !define MUI_WELCOMEPAGE_TITLE "Welcome to PageCapture"
 !define MUI_WELCOMEPAGE_TEXT "PageCapture lets you save any webpage as a clean, fully editable Word document.$\n$\nIncludes text, images, and clickable links.$\n$\nNote: Windows may warn you this is from an unknown publisher. Click 'More info' then 'Run anyway' — this is normal for new software."
 
