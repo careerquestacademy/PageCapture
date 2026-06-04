@@ -35,12 +35,11 @@
             ctx.drawImage(img, 0, 0);
             resolve(canvas.toDataURL('image/png'));
           } catch (e) {
-            resolve(null); // CORS blocked — that is ok
+            resolve(null);
           }
         };
         img.onerror = () => resolve(null);
         img.src = src;
-        // Timeout after 3 seconds
         setTimeout(() => resolve(null), 3000);
       } catch (e) {
         resolve(null);
@@ -53,7 +52,6 @@
     const blocks = [];
     const seen   = new Set();
 
-    // Remove noise elements from a clone
     const clone = document.body.cloneNode(true);
     NOISE_SELECTORS.forEach(sel => {
       try {
@@ -61,12 +59,10 @@
       } catch (e) {}
     });
 
-    // Collect all images first for parallel fetching
     const imgElements = Array.from(clone.querySelectorAll('img'));
     const imgSrcs     = imgElements.map(img =>
       img.currentSrc || img.src || img.dataset.src || '');
 
-    // Fetch all images in parallel
     const imgData = {};
     await Promise.all(
       imgSrcs.map(async (src, i) => {
@@ -76,7 +72,6 @@
       })
     );
 
-    // Walk the DOM and build blocks
     function walk(node) {
       if (!node) return;
 
@@ -85,47 +80,30 @@
 
       if (SKIP_TAGS.has(tag)) return;
 
-      // Headings
       if (/^h[1-6]$/.test(tag)) {
         const text = (node.innerText || '').trim();
         if (text && !seen.has('h' + text)) {
           seen.add('h' + text);
-          blocks.push({
-            type:  'heading',
-            level: parseInt(tag[1]),
-            text
-          });
+          blocks.push({ type: 'heading', level: parseInt(tag[1]), text });
         }
         return;
       }
 
-      // Images
       if (tag === 'img') {
-        const src = node.currentSrc || node.src
-                    || node.dataset.src || '';
+        const src = node.currentSrc || node.src || node.dataset.src || '';
         const alt = node.alt || '';
         if (src && !seen.has(src)) {
           seen.add(src);
-          blocks.push({
-            type:     'image',
-            src,
-            alt,
-            img_data: imgData[src] || null
-          });
+          blocks.push({ type: 'image', src, alt, img_data: imgData[src] || null });
         }
         return;
       }
 
-      // Links
       if (tag === 'a') {
         const text = (node.innerText || '').trim();
         let   href = node.getAttribute('href') || '';
-        // Make relative URLs absolute
-        if (href && !href.startsWith('http') &&
-            !href.startsWith('mailto')) {
-          try {
-            href = new URL(href, window.location.href).href;
-          } catch (e) {}
+        if (href && !href.startsWith('http') && !href.startsWith('mailto')) {
+          try { href = new URL(href, window.location.href).href; } catch (e) {}
         }
         if (text && href && !seen.has(text + href)) {
           seen.add(text + href);
@@ -134,7 +112,6 @@
         return;
       }
 
-      // List items
       if (tag === 'li') {
         const text = (node.innerText || '').trim();
         if (text && !seen.has('li' + text)) {
@@ -144,9 +121,7 @@
         return;
       }
 
-      // Paragraphs and text containers
-      if (['p', 'blockquote', 'figcaption',
-           'td', 'th', 'label'].includes(tag)) {
+      if (['p', 'blockquote', 'figcaption', 'td', 'th', 'label'].includes(tag)) {
         const text = (node.innerText || '').trim();
         if (text && text.length > 1 && !seen.has(text)) {
           seen.add(text);
@@ -155,7 +130,6 @@
         return;
       }
 
-      // Recurse into children
       for (const child of Array.from(node.childNodes)) {
         walk(child);
       }
@@ -165,7 +139,7 @@
     return blocks;
   }
 
-  // Send content to desktop app
+  // Send content to desktop app via background script (Native Messaging)
   async function sendToApp() {
     const blocks = await extractPage();
     const payload = {
@@ -175,23 +149,23 @@
     };
 
     try {
-      const response = await fetch('http://127.0.0.1:27182', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify(payload)
+      const response = await browser.runtime.sendMessage({
+        action: 'sendToApp',
+        payload
       });
-      if (response.ok) {
-        // Show brief success toast
+
+      if (response && response.success) {
         showToast('Sent to PageCapture!', '#a6e3a1');
       } else {
+        const msg = (response && response.error) || 'Unknown error';
         showToast('PageCapture app not running. Please open it first.', '#f38ba8');
+        console.error('PageCapture error:', msg);
       }
     } catch (e) {
       showToast('PageCapture app not running. Please open it first.', '#f38ba8');
     }
   }
 
-  // Small toast notification — no alert boxes
   function showToast(message, color) {
     const toast = document.createElement('div');
     Object.assign(toast.style, {
@@ -214,7 +188,6 @@
     setTimeout(() => toast.remove(), 4000);
   }
 
-  // Listen for message from background script
   browser.runtime.onMessage.addListener((msg) => {
     if (msg.action === 'capture') {
       sendToApp();

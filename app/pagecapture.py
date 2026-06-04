@@ -1,6 +1,6 @@
 """
-PageCapture v3
-Desktop app — receives page content from Firefox extension,
+PageCapture v3.1
+Desktop app — receives page content from Firefox extension via Native Messaging,
 converts to clean editable DOCX with embedded images and clickable links.
 No keyboard hooks. No mouse hooks. No system takeover. Ever.
 """
@@ -8,21 +8,19 @@ No keyboard hooks. No mouse hooks. No system takeover. Ever.
 import sys
 import os
 import json
+import struct
 import threading
 import tkinter as tk
 from tkinter import filedialog
 import re
 import base64
 import io
-import http.server
-import socketserver
-import time
 
 # ── Graceful imports ──────────────────────────────────────────────────────────
 
 try:
     from docx import Document
-    from docx.shared import Pt, RGBColor, Inches, Emu
+    from docx.shared import RGBColor, Inches
     from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
     HAS_DOCX = True
@@ -35,19 +33,13 @@ try:
 except ImportError:
     HAS_PIL = False
 
-try:
-    import win32api
-    import win32con
-    import subprocess
-    HAS_WIN32 = True
-except ImportError:
-    HAS_WIN32 = False
+import sys as _sys
+HAS_WIN32 = _sys.platform == "win32"
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
 APP_NAME    = "PageCapture"
-APP_VERSION = "3.0"
-PORT        = 27182  # local port extension talks to
+APP_VERSION = "3.1"
 SAVE_FOLDER = os.path.expanduser("~/Documents/PageCapture")
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".pagecapture3_config.json")
 
@@ -80,56 +72,45 @@ def save_config(cfg):
     except Exception:
         pass
 
-# ── Local HTTP server (receives data from extension) ─────────────────────────
+# ── Native Messaging I/O ──────────────────────────────────────────────────────
+# Firefox communicates via stdin/stdout using 4-byte little-endian length prefix.
 
-class CaptureHandler(http.server.BaseHTTPRequestHandler):
-    """
-    Listens on localhost only for data sent by the Firefox extension.
-    Extension POSTs JSON with page content — we receive and process it.
-    """
-    app_ref = None  # set to PageCaptureApp instance
+def read_native_message():
+    """Read one message from Firefox via stdin. Returns None on EOF."""
+    raw_len = sys.stdin.buffer.read(4)
+    if len(raw_len) < 4:
+        return None
+    msg_len = struct.unpack("<I", raw_len)[0]
+    raw_msg = sys.stdin.buffer.read(msg_len)
+    return json.loads(raw_msg.decode("utf-8"))
 
-    def do_OPTIONS(self):
-        """Handle CORS preflight from Firefox extension."""
-        self.send_response(200)
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'POST, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
-        self.end_headers()
+def send_native_message(data):
+    """Send one message back to Firefox via stdout."""
+    encoded = json.dumps(data).encode("utf-8")
+    sys.stdout.buffer.write(struct.pack("<I", len(encoded)))
+    sys.stdout.buffer.write(encoded)
+    sys.stdout.buffer.flush()
 
-    def do_POST(self):
-        try:
-            length  = int(self.headers.get('Content-Length', 0))
-            body    = self.rfile.read(length)
-            data    = json.loads(body.decode('utf-8'))
+def start_native_listener(app):
+    """Read messages from Firefox in a background thread, dispatch to GUI."""
+    def _listen():
+        while True:
+            try:
+                msg = read_native_message()
+                if msg is None:
+                    break  # Firefox closed the connection
+                # Hand off to GUI on main thread
+                app.root.after(0, lambda m=msg: app.on_content_received(m))
+                send_native_message({"status": "ok"})
+            except Exception as e:
+                try:
+                    send_native_message({"status": "error", "message": str(e)})
+                except Exception:
+                    pass
+                break
 
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(b'{"status":"ok"}')
-
-            # Hand off to app on main thread
-            if CaptureHandler.app_ref:
-                CaptureHandler.app_ref.root.after(
-                    0, lambda: CaptureHandler.app_ref.on_content_received(data))
-
-        except Exception as e:
-            self.send_response(500)
-            self.end_headers()
-            self.wfile.write(json.dumps(
-                {"error": str(e)}).encode())
-
-    def log_message(self, format, *args):
-        pass  # suppress server log noise
-
-
-def start_server(app):
-    CaptureHandler.app_ref = app
-    server = socketserver.TCPServer(('127.0.0.1', PORT), CaptureHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    return server
+    t = threading.Thread(target=_listen, daemon=True)
+    t.start()
 
 # ── DOCX builder ──────────────────────────────────────────────────────────────
 
@@ -140,55 +121,49 @@ def blocks_to_docx(title, blocks, save_path):
     """
     doc = Document()
 
-    # Page margins — comfortable reading width
     for section in doc.sections:
         section.top_margin    = Inches(1)
         section.bottom_margin = Inches(1)
         section.left_margin   = Inches(1.2)
         section.right_margin  = Inches(1.2)
 
-    # Title
-    title_para = doc.add_heading(title or 'Captured Page', level=1)
+    doc.add_heading(title or 'Captured Page', level=1)
 
     for block in blocks:
-        btype = block.get('type', 'text')
-        text  = block.get('text', '').strip()
-        href  = block.get('href', '')
-        alt   = block.get('alt', '')
-        level = block.get('level', 2)
-        src   = block.get('src', '')
-        img_data = block.get('img_data', '')  # base64 image data from extension
+        btype    = block.get('type', 'text')
+        text     = block.get('text', '').strip()
+        href     = block.get('href', '')
+        alt      = block.get('alt', '')
+        level    = block.get('level', 2)
+        src      = block.get('src', '')
+        img_data = block.get('img_data', '')
 
         if btype == 'heading' and text:
             doc.add_heading(text, level=min(level, 6))
 
         elif btype == 'link' and text:
-            p   = doc.add_paragraph()
+            p = doc.add_paragraph()
             _add_hyperlink(p, text, href)
 
         elif btype == 'listitem' and text:
             doc.add_paragraph(text, style='List Bullet')
 
         elif btype == 'image':
-            # Try to embed the image
             embedded = False
             if img_data:
                 try:
-                    # Strip data URI prefix if present
                     if ',' in img_data:
                         img_data = img_data.split(',', 1)[1]
-                    img_bytes = base64.b64decode(img_data)
+                    img_bytes  = base64.b64decode(img_data)
                     img_stream = io.BytesIO(img_bytes)
                     if HAS_PIL:
-                        # Verify and get dimensions
                         pil_img = Image.open(img_stream)
-                        w, h = pil_img.size
+                        w, h    = pil_img.size
                         img_stream.seek(0)
-                        # Scale to max 5 inches wide
                         max_w = Inches(5)
                         if w > 0:
-                            ratio   = min(1.0, max_w / (w * 9144))
-                            doc_w   = Inches(w * ratio / 96)
+                            ratio = min(1.0, max_w / (w * 9144))
+                            doc_w = Inches(w * ratio / 96)
                         else:
                             doc_w = Inches(4)
                         doc.add_picture(img_stream, width=doc_w)
@@ -199,7 +174,6 @@ def blocks_to_docx(title, blocks, save_path):
                     embedded = False
 
             if not embedded:
-                # Fall back to alt text note
                 p   = doc.add_paragraph()
                 run = p.add_run(f'[Image: {alt or src or "image"}]')
                 run.italic = True
@@ -212,10 +186,9 @@ def blocks_to_docx(title, blocks, save_path):
 
 
 def _add_hyperlink(paragraph, text, url):
-    """Add a clickable hyperlink to a paragraph."""
     try:
-        part    = paragraph.part
-        r_id    = part.relate_to(
+        part  = paragraph.part
+        r_id  = part.relate_to(
             url,
             'http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink',
             is_external=True)
@@ -231,7 +204,6 @@ def _add_hyperlink(paragraph, text, url):
         hyperlink.append(new_run)
         paragraph._p.append(hyperlink)
     except Exception:
-        # Fallback if hyperlink fails
         run = paragraph.add_run(f'{text} [{url}]')
         run.font.color.rgb = RGBColor(0x00, 0x66, 0xCC)
         run.underline = True
@@ -240,7 +212,6 @@ def _add_hyperlink(paragraph, text, url):
 # ── Find installed document editors ──────────────────────────────────────────
 
 def find_doc_editors():
-    """Find installed document editors on this Windows machine."""
     editors = []
     candidates = [
         ("LibreOffice Writer",
@@ -272,7 +243,6 @@ def find_doc_editors():
 
 
 def open_with_editor(doc_path, editor_path):
-    """Open a document with a specific editor."""
     try:
         import subprocess
         subprocess.Popen([editor_path, doc_path])
@@ -294,7 +264,6 @@ class PageCaptureApp:
         self.root.configure(bg=COLORS['bg'])
         self.root.resizable(True, True)
 
-        # Center on screen
         self.root.update_idletasks()
         x = (self.root.winfo_screenwidth()  // 2) - 240
         y = (self.root.winfo_screenheight() // 2) - 200
@@ -302,11 +271,8 @@ class PageCaptureApp:
 
         self.last_data = None
 
-        # Start local server in background
-        try:
-            start_server(self)
-        except Exception:
-            pass
+        # Start Native Messaging listener (replaces old HTTP server)
+        start_native_listener(self)
 
         self._show_waiting()
         self.root.mainloop()
@@ -324,7 +290,6 @@ class PageCaptureApp:
         body = tk.Frame(self.root, bg=COLORS['bg'])
         body.pack(fill='both', expand=True, padx=24, pady=16)
 
-        # Instruction steps
         steps = [
             ("1", "Open the page you want to capture in Firefox"),
             ("2", "Click the PageCapture button in your Firefox toolbar"),
@@ -352,16 +317,13 @@ class PageCaptureApp:
                      wraplength=360,
                      justify='left').pack(side='left', fill='x', expand=True)
 
-        # Status indicator
-        self.status_var = tk.StringVar(
-            value="Waiting for Firefox extension...")
+        self.status_var = tk.StringVar(value="Waiting for Firefox extension...")
         tk.Label(body,
                  textvariable=self.status_var,
                  bg=COLORS['bg'],
                  fg=COLORS['blue'],
                  font=('Arial', 10, 'italic')).pack(pady=16)
 
-        # Settings button
         tk.Button(body,
                   text="⚙  Change save folder",
                   bg=COLORS['panel'],
@@ -377,17 +339,15 @@ class PageCaptureApp:
     # ── Content received from extension ──────────────────────────────────────
 
     def on_content_received(self, data):
-        """Called when Firefox extension sends page content."""
         self.last_data = data
         title  = data.get('title', 'Captured Page')
         blocks = data.get('blocks', [])
-        url    = data.get('url', '')
 
         if not blocks:
             self.status_var.set("No content received. Try again.")
             return
 
-        self._show_save_screen(title, url, blocks)
+        self._show_save_screen(title, data.get('url', ''), blocks)
 
     # ── Save screen ───────────────────────────────────────────────────────────
 
@@ -402,7 +362,6 @@ class PageCaptureApp:
         body = tk.Frame(self.root, bg=COLORS['bg'])
         body.pack(fill='both', expand=True, padx=24, pady=12)
 
-        # Page title
         tk.Label(body,
                  text="Captured page:",
                  bg=COLORS['bg'],
@@ -418,10 +377,9 @@ class PageCaptureApp:
                  wraplength=440,
                  justify='left').pack(fill='x', pady=(2,12))
 
-        # Block count
-        text_count  = sum(1 for b in blocks if b.get('type') == 'text')
-        img_count   = sum(1 for b in blocks if b.get('type') == 'image')
-        link_count  = sum(1 for b in blocks if b.get('type') == 'link')
+        text_count = sum(1 for b in blocks if b.get('type') == 'text')
+        img_count  = sum(1 for b in blocks if b.get('type') == 'image')
+        link_count = sum(1 for b in blocks if b.get('type') == 'link')
 
         tk.Label(body,
                  text=f"{len(blocks)} items captured  —  "
@@ -432,7 +390,6 @@ class PageCaptureApp:
                  fg=COLORS['muted'],
                  font=('Arial', 10)).pack(anchor='w', pady=(0,12))
 
-        # Find editors
         editors = find_doc_editors()
 
         if editors:
@@ -456,7 +413,6 @@ class PageCaptureApp:
                               title, blocks, p)
                           ).pack(fill='x', pady=2)
 
-        # Always show save to folder option
         tk.Button(body,
                   text="💾  Save to folder only (no editor)",
                   bg=COLORS['panel'],
@@ -487,7 +443,6 @@ class PageCaptureApp:
         safe = re.sub(r'[\\/:*?"<>|]', '_', title or 'capture')[:60]
         path = os.path.join(folder, safe + '.docx')
 
-        # Handle duplicate filenames
         counter = 1
         while os.path.exists(path):
             path = os.path.join(folder, f"{safe}_{counter}.docx")
@@ -501,8 +456,9 @@ class PageCaptureApp:
                 blocks_to_docx(title, blocks, path)
                 self.root.after(0, lambda: self._on_saved(path, editor_path))
             except Exception as e:
-                self.root.after(0, lambda: self.save_status.set(
-                    f"Error: {str(e)}"))
+                err = str(e)
+                self.root.after(0, lambda msg=err: self.save_status.set(
+                    f"Error: {msg}"))
 
         threading.Thread(target=do_save, daemon=True).start()
 
@@ -516,14 +472,13 @@ class PageCaptureApp:
             except Exception:
                 pass
 
-        # After 4 seconds go back to waiting screen
         self.root.after(4000, self._show_waiting)
 
     # ── Settings ──────────────────────────────────────────────────────────────
 
     def _settings(self):
-        cfg  = load_config()
-        win  = tk.Toplevel(self.root)
+        cfg = load_config()
+        win = tk.Toplevel(self.root)
         win.title("Settings")
         win.geometry("460x160")
         win.configure(bg=COLORS['bg'])
@@ -538,8 +493,7 @@ class PageCaptureApp:
         row = tk.Frame(win, bg=COLORS['bg'])
         row.pack(fill='x', padx=16)
 
-        folder_var = tk.StringVar(
-            value=cfg.get('save_folder', SAVE_FOLDER))
+        folder_var = tk.StringVar(value=cfg.get('save_folder', SAVE_FOLDER))
         tk.Entry(row,
                  textvariable=folder_var,
                  bg=COLORS['panel'],

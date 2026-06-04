@@ -1,0 +1,9 @@
+{
+  "name": "com.careerquest.pagecapture",
+  "description": "PageCapture Native Messaging Host",
+  "path": "C:\\Program Files\\PageCapture\\PageCapture.exe",
+  "type": "stdio",
+  "allowed_extensions": [
+    "pagecapture@careerquestacademy.org"
+  ]
+}

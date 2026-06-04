@@ -1,14 +1,13 @@
 {
   "manifest_version": 2,
   "name": "PageCapture",
-  "version": "3.0",
+  "version": "3.1",
   "description": "Send any page to PageCapture desktop app as an editable document",
   "permissions": [
     "activeTab",
-    "tabs"
+    "tabs",
+    "nativeMessaging"
   ],
-  "host_permissions": [
-"http://127.0.0.1/*"],
   "browser_action": {
     "default_icon": {
       "16": "icons/icon16.png",
@@ -32,5 +31,11 @@
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "pagecapture@careerquestacademy.org",
+      "strict_min_version": "78.0"
+    }
   }
 }
