@@ -1,6 +1,0 @@
-pyinstaller
-pillow
-pyperclip
-python-docx
-pywin32
-comtypes
