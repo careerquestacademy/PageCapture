@@ -1,8 +1,0 @@
-pyinstaller
-pystray
-pillow
-keyboard
-pyperclip
-python-docx
-pywin32
-comtypes
