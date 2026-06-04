@@ -74,6 +74,10 @@ def save_config(cfg):
 
 # ── Native Messaging I/O ──────────────────────────────────────────────────────
 # Firefox communicates via stdin/stdout using 4-byte little-endian length prefix.
+# Because Firefox launches a SEPARATE instance of the exe as a subprocess,
+# we use a local socket to forward captured data to the visible GUI instance.
+
+SOCKET_PORT = 27183  # internal forwarding port (localhost only, not Firefox)
 
 def read_native_message():
     """Read one message from Firefox via stdin. Returns None on EOF."""
@@ -91,26 +95,83 @@ def send_native_message(data):
     sys.stdout.buffer.write(encoded)
     sys.stdout.buffer.flush()
 
+def is_gui_instance():
+    """True if we were launched by the user (no stdin data from Firefox)."""
+    return sys.stdin is None or not hasattr(sys.stdin, 'buffer')
+
 def start_native_listener(app):
-    """Read messages from Firefox in a background thread, dispatch to GUI."""
-    def _listen():
+    """
+    Two modes:
+    1. GUI instance (user double-clicked): listen on local socket for forwarded data.
+    2. Host instance (Firefox launched us): read stdin, forward to GUI via socket, exit.
+    """
+    import socket as _socket
+
+    def _forward_to_gui(msg):
+        """Called in host instance — send data to GUI instance via socket."""
+        try:
+            s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+            s.settimeout(3)
+            s.connect(('127.0.0.1', SOCKET_PORT))
+            data = json.dumps(msg).encode('utf-8')
+            s.sendall(struct.pack('<I', len(data)) + data)
+            s.close()
+            send_native_message({"status": "ok"})
+        except Exception as e:
+            send_native_message({"status": "error", "message": str(e)})
+
+    def _host_mode():
+        """Read from Firefox stdin and forward to GUI instance."""
+        while True:
+            msg = read_native_message()
+            if msg is None:
+                break
+            _forward_to_gui(msg)
+
+    def _gui_socket_server():
+        """Listen for forwarded messages from host instances."""
+        import socket as _socket
+        srv = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        srv.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        try:
+            srv.bind(('127.0.0.1', SOCKET_PORT))
+        except OSError:
+            return  # another GUI instance already listening
+        srv.listen(5)
         while True:
             try:
-                msg = read_native_message()
-                if msg is None:
-                    break  # Firefox closed the connection
-                # Hand off to GUI on main thread
+                conn, _ = srv.accept()
+                raw_len = conn.recv(4)
+                if len(raw_len) < 4:
+                    conn.close()
+                    continue
+                msg_len = struct.unpack('<I', raw_len)[0]
+                raw_msg = b''
+                while len(raw_msg) < msg_len:
+                    chunk = conn.recv(msg_len - len(raw_msg))
+                    if not chunk:
+                        break
+                    raw_msg += chunk
+                conn.close()
+                msg = json.loads(raw_msg.decode('utf-8'))
                 app.root.after(0, lambda m=msg: app.on_content_received(m))
-                send_native_message({"status": "ok"})
-            except Exception as e:
-                try:
-                    send_native_message({"status": "error", "message": str(e)})
-                except Exception:
-                    pass
-                break
+            except Exception:
+                continue
 
-    t = threading.Thread(target=_listen, daemon=True)
-    t.start()
+    # Detect whether Firefox launched us (stdin has data) or user launched us
+    test = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    test.settimeout(0.1)
+    try:
+        test.connect(('127.0.0.1', SOCKET_PORT))
+        test.close()
+        # GUI instance already running — we are the host instance
+        t = threading.Thread(target=_host_mode, daemon=True)
+        t.start()
+    except OSError:
+        test.close()
+        # No GUI instance yet — we are the GUI instance, start socket server
+        t = threading.Thread(target=_gui_socket_server, daemon=True)
+        t.start()
 
 # ── DOCX builder ──────────────────────────────────────────────────────────────
 
