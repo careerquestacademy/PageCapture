@@ -1,0 +1,62 @@
+name: Build PageCapture Windows Installer
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r app/requirements.txt
+
+      - name: Generate icon
+        run: python make_icon.py
+
+      - name: Build executable with PyInstaller
+        working-directory: app
+        run: pyinstaller pagecapture.spec --clean --noconfirm
+
+      - name: Copy extension into app dist folder
+        run: xcopy /E /I extension app\dist\PageCapture\extension
+
+      - name: Install NSIS
+        run: choco install nsis --yes
+
+      - name: Build installer with NSIS
+        run: '& "C:\Program Files (x86)\NSIS\makensis.exe" installer.nsi'
+
+      - name: Upload installer as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PageCapture_Setup
+          path: PageCapture_Setup.exe
+          retention-days: 30
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: github.ref == 'refs/heads/main'
+        with:
+          tag_name: v3.0.${{ github.run_number }}
+          name: PageCapture v3.0.${{ github.run_number }}
+          body: |
+            Windows installer — download PageCapture_Setup.exe below.
+            Double-click to install. Desktop icon created automatically.
+            Includes Firefox extension for capturing web pages.
+          files: PageCapture_Setup.exe

@@ -1,0 +1,5 @@
+pyinstaller
+pillow
+python-docx
+pywin32
+comtypes
