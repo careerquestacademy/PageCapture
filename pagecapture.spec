@@ -4,7 +4,7 @@
 block_cipher = None
 
 a = Analysis(
-    ['src/pagecapture.py'],
+    ['pagecapture.py'],
     pathex=['.'],
     binaries=[],
     datas=[],
