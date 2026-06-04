@@ -32,7 +32,7 @@ SetCompressor lzma
 
 Section "Install"
   SetOutPath "$INSTDIR"
-  File /r "dist\PageCapture\*.*"
+  File /r "app\dist\PageCapture\*.*"
 
   ; Firefox extension folder
   SetOutPath "$INSTDIR\extension"
